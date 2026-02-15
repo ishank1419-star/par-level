@@ -59,7 +59,7 @@ export default function EmployeeClient({ initialRows }: { initialRows: Observati
 
       {/* ✅ Created by Mohand */}
       <div style={{ position: "fixed", right: 16, bottom: 12, opacity: 0.7, fontSize: 12 }}>
-        Created by Mohand
+        Created by mohammed
       </div>
     </div>
   );
