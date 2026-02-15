@@ -112,7 +112,7 @@ export default function LoginPage() {
         </button>
 
         <div style={{ position: "relative", height: 30, marginTop: 10 }}>
-          <small style={{ position: "absolute", right: 0, bottom: 0, opacity: 0.7 }}>Created By Mohand</small>
+          <small style={{ position: "absolute", right: 0, bottom: 0, opacity: 0.7 }}>Created By Mohammed</small>
         </div>
       </form>
     </div>
