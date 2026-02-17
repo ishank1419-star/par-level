@@ -68,27 +68,32 @@ export default function AdminClient({
     await refresh();
   }
 
-  async function deleteAll() {
-    const ok = confirm("⚠️ Delete ALL observations and ALL photos?\nThis cannot be undone.");
-    if (!ok) return;
+async function deleteAll() {
+  const ok = confirm("⚠️ Delete ALL observations and ALL photos?\nThis cannot be undone.");
+  if (!ok) return;
 
-    const res = await fetch("/api/admin/purge-observations", { method: "POST" });
-    const json = await res.json().catch(() => ({}));
+  try {
+    const res = await fetch("/api/admin/purge-observations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+    });
+
+    const text = await res.text();
+    let json: any = null;
+    try { json = JSON.parse(text); } catch {}
 
     if (!res.ok) {
-      alert(json?.error ?? "Failed");
+      alert(json?.error ? `Error: ${json.error}` : `Failed: ${res.status}\n${text}`);
       return;
     }
 
-    alert(`Done ✅ Deleted rows & photos.\nDeleted photos: ${json.deletedPhotos ?? 0}`);
+    alert(`Done ✅ Deleted photos: ${json?.deletedPhotos ?? 0}`);
     await refresh();
+  } catch (e: any) {
+    alert(`Request failed: ${e?.message ?? e}`);
   }
-
-  async function exportToExcel() {
-    if (!filteredRows.length) {
-      alert("No data to export");
-      return;
-    }
+}
 
     // 1) Get admin name (optional)
     const {
