@@ -83,272 +83,231 @@ export default function AdminClient({
   }
 
   // ✅ Excel Export with images (Private bucket => Signed URLs)
-  async function exportToExcel() {
-    if (!filteredRows.length) {
-      alert("No data to export");
-      return;
-    }
+async function exportToExcel() {
+  if (!filteredRows.length) {
+    alert("No data to export");
+    return;
+  }
 
-    const ExcelJS = (await import("exceljs")).default;
-    const wb = new ExcelJS.Workbook();
-    const ws = wb.addWorksheet("Observations");
+  // ✅ Get admin name from profiles
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
 
-    ws.columns = [
-      { header: "Item No", key: "item_no", width: 14 },
-      { header: "Date", key: "date", width: 12 },
-      { header: "Contractor", key: "contractor", width: 18 },
-      { header: "Location", key: "location", width: 18 },
-      { header: "Category", key: "category", width: 22 },
-      { header: "Risk", key: "risk", width: 10 },
-      { header: "Status", key: "status", width: 10 },
-      { header: "Assigned To", key: "assigned_to", width: 16 },
-      { header: "Observation", key: "observation", width: 30 },
-      { header: "Recommendation", key: "recommendation", width: 30 },
-      { header: "Before Photo", key: "before_img", width: 18 },
-      { header: "After Photo", key: "after_img", width: 18 },
-    ];
+  let adminName = "Admin";
+  if (user?.id) {
+    const { data: prof } = await supabase.from("profiles").select("full_name").eq("id", user.id).single();
+    adminName = prof?.full_name ?? "Admin";
+  }
 
-    // Header style
-    ws.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
-    ws.getRow(1).alignment = { vertical: "middle", horizontal: "center" };
-    ws.getRow(1).height = 22;
-    ws.getRow(1).eachCell((cell: any) => {
-      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF8B0000" } };
+  const ExcelJS = (await import("exceljs")).default;
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Report");
+
+  // ---------- Helpers ----------
+  async function fetchAsBase64(url: string) {
+    const res = await fetch(url);
+    const ab = await res.arrayBuffer();
+    return arrayBufferToBase64(ab);
+  }
+
+  async function pathToImageId(path: string) {
+    const { data, error } = await supabase.storage.from("observations").createSignedUrl(path, 60 * 5);
+    if (error || !data?.signedUrl) return null;
+
+    const res = await fetch(data.signedUrl);
+    if (!res.ok) return null;
+
+    const ab = await res.arrayBuffer();
+    const b64 = arrayBufferToBase64(ab);
+    const ext = path.toLowerCase().endsWith(".png") ? "png" : "jpeg";
+    return wb.addImage({ base64: `data:image/${ext};base64,${b64}`, extension: ext });
+  }
+
+  function setBorder(rowIndex: number, fromCol: number, toCol: number) {
+    for (let c = fromCol; c <= toCol; c++) {
+      const cell = ws.getCell(rowIndex, c);
       cell.border = {
         top: { style: "thin" },
         left: { style: "thin" },
         bottom: { style: "thin" },
         right: { style: "thin" },
       };
-    });
-
-    async function pathToImageId(path: string) {
-      const { data, error } = await supabase.storage.from("observations").createSignedUrl(path, 60 * 5);
-      if (error || !data?.signedUrl) return null;
-
-      const res = await fetch(data.signedUrl);
-      if (!res.ok) return null;
-
-      const ab = await res.arrayBuffer();
-      const b64 = arrayBufferToBase64(ab);
-      const ext = path.toLowerCase().endsWith(".png") ? "png" : "jpeg";
-
-      return wb.addImage({ base64: `data:image/${ext};base64,${b64}`, extension: ext });
     }
-
-    // Rows + images
-    for (let i = 0; i < filteredRows.length; i++) {
-      const r = filteredRows[i];
-      const rowIndex = i + 2;
-
-      ws.addRow({
-        item_no: r.item_no ?? "",
-        date: r.date ?? "",
-        contractor: r.contractor ?? "",
-        location: r.location ?? "",
-        category: r.category ?? "",
-        risk: r.risk ?? "",
-        status: r.status ?? "",
-        assigned_to: r.assigned_to ?? "",
-        observation: r.observation ?? "",
-        recommendation: r.recommendation ?? "",
-      });
-
-      ws.getRow(rowIndex).height = 70;
-      ws.getRow(rowIndex).alignment = { vertical: "top", wrapText: true };
-
-      ws.getRow(rowIndex).eachCell((cell: any) => {
-        cell.border = {
-          top: { style: "thin" },
-          left: { style: "thin" },
-          bottom: { style: "thin" },
-          right: { style: "thin" },
-        };
-      });
-
-      // Before (K)
-      if (r.before_photo_url) {
-        const imgId = await pathToImageId(r.before_photo_url);
-        if (imgId) {
-          ws.addImage(imgId, { tl: { col: 10, row: rowIndex - 1 }, ext: { width: 120, height: 80 } });
-        } else {
-          ws.getCell(`K${rowIndex}`).value = "No Image";
-        }
-      } else {
-        ws.getCell(`K${rowIndex}`).value = "-";
-      }
-
-      // After (L)
-      if (r.after_photo_url) {
-        const imgId = await pathToImageId(r.after_photo_url);
-        if (imgId) {
-          ws.addImage(imgId, { tl: { col: 11, row: rowIndex - 1 }, ext: { width: 120, height: 80 } });
-        } else {
-          ws.getCell(`L${rowIndex}`).value = "No Image";
-        }
-      } else {
-        ws.getCell(`L${rowIndex}`).value = "-";
-      }
-    }
-
-    ws.views = [{ state: "frozen", ySplit: 1 }];
-
-    const buf = await wb.xlsx.writeBuffer();
-    const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-    saveAs(blob, `Observations_${new Date().toISOString().slice(0, 10)}.xlsx`);
   }
 
-  return (
-    <div style={{ minHeight: "100vh", background: "#1e1e1e", color: "#e0e0e0", padding: 18 }}>
-      <Header
-        title="Admin Dashboard"
-        onNew={() => {
-          setCreating(true);
-          setEditing(null);
-        }}
-        onExport={exportToExcel}
-        onDeleteAll={deleteAll}
-      />
+  // ---------- Layout ----------
+  // columns for the table (starting later)
+  ws.columns = [
+    { header: "Item No", key: "item_no", width: 14 },
+    { header: "Date", key: "date", width: 12 },
+    { header: "Contractor", key: "contractor", width: 18 },
+    { header: "Location", key: "location", width: 18 },
+    { header: "Category", key: "category", width: 22 },
+    { header: "Risk", key: "risk", width: 10 },
+    { header: "Status", key: "status", width: 10 },
+    { header: "Assigned To", key: "assigned_to", width: 16 },
+    { header: "Observation", key: "observation", width: 30 },
+    { header: "Recommendation", key: "recommendation", width: 30 },
+    { header: "Before Photo", key: "before_img", width: 18 },
+    { header: "After Photo", key: "after_img", width: 18 },
+  ];
 
-      {/* 🔎 FILTER BAR */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(6, 1fr)",
-          gap: 12,
-          marginBottom: 20,
-          background: "#2a2a2a",
-          padding: 15,
-          borderRadius: 12,
-          border: "1px solid #333",
-        }}
-      >
-        <select value={contractor} onChange={(e) => setContractor(e.target.value)} style={input()}>
-          <option value="">All Contractors</option>
-          {CONTRACTORS.map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
-          ))}
-        </select>
+  // ---------- Header area ----------
+  // Merge top area for a clean report header
+  ws.mergeCells("A1:L1");
+  ws.mergeCells("A2:L2");
+  ws.mergeCells("A3:L3");
 
-        <select value={risk} onChange={(e) => setRisk(e.target.value)} style={input()}>
-          <option value="">All Risk</option>
-          {RISK_LEVELS.map((r) => (
-            <option key={r} value={r}>
-              {r}
-            </option>
-          ))}
-        </select>
+  ws.getRow(1).height = 36;
+  ws.getRow(2).height = 22;
+  ws.getRow(3).height = 18;
 
-        <select value={status} onChange={(e) => setStatus(e.target.value)} style={input()}>
-          <option value="">All Status</option>
-          {STATUSES.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
+  // Title
+  ws.getCell("A1").value = "Monthly Observation Report";
+  ws.getCell("A1").font = { bold: true, size: 18, color: { argb: "FFFFFFFF" } };
+  ws.getCell("A1").alignment = { vertical: "middle", horizontal: "center" };
+  ws.getCell("A1").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF8B0000" } };
 
-        <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} style={input()} />
-        <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} style={input()} />
+  // Subtitle (date + admin)
+  const today = new Date();
+  const dateStr = today.toISOString().slice(0, 10);
 
-        <button onClick={resetFilters} style={resetBtn()}>
-          Reset
-        </button>
-      </div>
+  ws.getCell("A2").value = `Report Date: ${dateStr}   |   Created by: ${adminName}`;
+  ws.getCell("A2").font = { bold: true, size: 11, color: { argb: "FFE0E0E0" } };
+  ws.getCell("A2").alignment = { vertical: "middle", horizontal: "center" };
+  ws.getCell("A2").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2A2A2A" } };
 
-      {/* Create/Edit */}
-      {(creating || editing) && (
-        <div style={{ marginBottom: 20 }}>
-          {creating && (
-            <div style={{ marginBottom: 10 }}>
-              <select value={owner} onChange={(e) => setOwner(e.target.value)} style={input()}>
-                {employees
-                  .filter((e) => e.role === "employee")
-                  .map((e) => (
-                    <option key={e.id} value={e.id}>
-                      {e.full_name ?? e.id}
-                    </option>
-                  ))}
-              </select>
-            </div>
-          )}
+  // Filters info
+  const filters = [
+    contractor ? `Contractor=${contractor}` : null,
+    risk ? `Risk=${risk}` : null,
+    status ? `Status=${status}` : null,
+    dateFrom ? `From=${dateFrom}` : null,
+    dateTo ? `To=${dateTo}` : null,
+  ]
+    .filter(Boolean)
+    .join("  |  ");
 
-          <ObservationForm
-            mode={creating ? "create" : "edit"}
-            initial={editing}
-            ownerUserIdForAdmin={creating ? owner : undefined}
-            onCancel={() => {
-              setCreating(false);
-              setEditing(null);
-            }}
-            onSaved={async () => {
-              setCreating(false);
-              setEditing(null);
-              await refresh();
-            }}
-          />
-        </div>
-      )}
+  ws.getCell("A3").value = filters ? `Filters: ${filters}` : "Filters: None";
+  ws.getCell("A3").font = { size: 10, color: { argb: "FFB0B0B0" } };
+  ws.getCell("A3").alignment = { vertical: "middle", horizontal: "center" };
+  ws.getCell("A3").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1F1F1F" } };
 
-      <ObservationsTable
-        rows={filteredRows}
-        onEdit={(r) => {
-          setEditing(r);
-          setCreating(false);
-        }}
-        onDelete={deleteRow}
-      />
+  // Add logo (from public folder)
+  // NOTE: This uses the same origin. On localhost and on Vercel it works.
+  // If logo fails to load, it will just skip.
+  try {
+    const logoBase64 = await fetchAsBase64("/logo.png");
+    const logoId = wb.addImage({ base64: `data:image/png;base64,${logoBase64}`, extension: "png" });
 
-      <div style={{ position: "fixed", right: 16, bottom: 12, opacity: 0.7, fontSize: 12 }}>Created by Mohand</div>
-    </div>
-  );
-}
+    // Place logo at top-left area
+    ws.addImage(logoId, {
+      tl: { col: 0, row: 0 },
+      ext: { width: 120, height: 60 },
+    });
+  } catch {
+    // ignore if logo cannot be fetched
+  }
 
-function Header({
-  title,
-  onNew,
-  onExport,
-  onDeleteAll,
-}: {
-  title: string;
-  onNew: () => void;
-  onExport: () => void;
-  onDeleteAll: () => void;
-}) {
-  return (
-    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 20, alignItems: "center" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <img src="/logo.png" alt="Company Logo" style={{ height: 42, width: "auto" }} />
-        <h1 style={{ margin: 0 }}>{title}</h1>
-      </div>
+  // ---------- Table header row ----------
+  const tableHeaderRow = 5; // we start table at row 5
+  ws.getRow(4).height = 8;
 
-      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-        <form action="/api/auth/signout" method="post">
-          <button type="submit" style={btnAlt()}>
-            Sign out
-          </button>
-        </form>
+  const headers = [
+    "Item No",
+    "Date",
+    "Contractor",
+    "Location",
+    "Category",
+    "Risk",
+    "Status",
+    "Assigned To",
+    "Observation",
+    "Recommendation",
+    "Before Photo",
+    "After Photo",
+  ];
 
-        <Link href="/admin/stats" style={btnLink()}>
-          Employee Stats
-        </Link>
+  ws.getRow(tableHeaderRow).values = ["", ...headers];
+  ws.getRow(tableHeaderRow).height = 22;
+  ws.getRow(tableHeaderRow).font = { bold: true, color: { argb: "FFFFFFFF" } };
+  ws.getRow(tableHeaderRow).alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+  ws.getRow(tableHeaderRow).eachCell((cell: any) => {
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF3A3A3A" } };
+  });
+  setBorder(tableHeaderRow, 1, 12);
 
-        <button onClick={onExport} style={btnGray()}>
-          Export Excel (with images)
-        </button>
+  // ---------- Data rows ----------
+  for (let i = 0; i < filteredRows.length; i++) {
+    const r = filteredRows[i];
+    const rowIndex = tableHeaderRow + 1 + i;
 
-        <button onClick={onDeleteAll} style={btnDanger()}>
-          Delete All
-        </button>
+    ws.getRow(rowIndex).height = 75;
+    ws.getRow(rowIndex).alignment = { vertical: "top", wrapText: true };
 
-        <button onClick={onNew} style={btnPrimary()}>
-          + New
-        </button>
-      </div>
-    </div>
-  );
+    ws.getCell(rowIndex, 1).value = r.item_no ?? "";
+    ws.getCell(rowIndex, 2).value = r.date ?? "";
+    ws.getCell(rowIndex, 3).value = r.contractor ?? "";
+    ws.getCell(rowIndex, 4).value = r.location ?? "";
+    ws.getCell(rowIndex, 5).value = r.category ?? "";
+    ws.getCell(rowIndex, 6).value = r.risk ?? "";
+    ws.getCell(rowIndex, 7).value = r.status ?? "";
+    ws.getCell(rowIndex, 8).value = r.assigned_to ?? "";
+    ws.getCell(rowIndex, 9).value = r.observation ?? "";
+    ws.getCell(rowIndex, 10).value = r.recommendation ?? "";
+
+    setBorder(rowIndex, 1, 12);
+
+    // Risk cell coloring (subtle)
+    const riskCell = ws.getCell(rowIndex, 6);
+    if ((r.risk ?? "") === "High") {
+      riskCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "33FF0000" } };
+    }
+
+    // Before image (col 11)
+    if (r.before_photo_url) {
+      const imgId = await pathToImageId(r.before_photo_url);
+      if (imgId) {
+        ws.addImage(imgId, {
+          tl: { col: 10, row: rowIndex - 1 },
+          ext: { width: 120, height: 80 },
+        });
+      } else {
+        ws.getCell(rowIndex, 11).value = "No Image";
+      }
+    } else {
+      ws.getCell(rowIndex, 11).value = "-";
+    }
+
+    // After image (col 12)
+    if (r.after_photo_url) {
+      const imgId = await pathToImageId(r.after_photo_url);
+      if (imgId) {
+        ws.addImage(imgId, {
+          tl: { col: 11, row: rowIndex - 1 },
+          ext: { width: 120, height: 80 },
+        });
+      } else {
+        ws.getCell(rowIndex, 12).value = "No Image";
+      }
+    } else {
+      ws.getCell(rowIndex, 12).value = "-";
+    }
+  }
+
+  ws.views = [{ state: "frozen", ySplit: tableHeaderRow }];
+
+  // Footer note
+  const footerRow = tableHeaderRow + filteredRows.length + 2;
+  ws.mergeCells(`A${footerRow}:L${footerRow}`);
+  ws.getCell(`A${footerRow}`).value = "Generated from Par Level Observation System";
+  ws.getCell(`A${footerRow}`).alignment = { horizontal: "center" };
+  ws.getCell(`A${footerRow}`).font = { italic: true, size: 10, color: { argb: "FFB0B0B0" } };
+
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  saveAs(blob, `Monthly_Observation_Report_${dateStr}.xlsx`);
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer) {
