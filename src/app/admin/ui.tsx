@@ -23,7 +23,9 @@ export default function AdminClient({
   const [rows, setRows] = useState<Observation[]>(initialRows);
   const [editing, setEditing] = useState<Observation | null>(null);
   const [creating, setCreating] = useState(false);
-  const [owner, setOwner] = useState<string>(employees.find((e) => e.role === "employee")?.id ?? "");
+  const [owner, setOwner] = useState<string>(
+    employees.find((e) => e.role === "employee")?.id ?? ""
+  );
 
   // Filters
   const [contractor, setContractor] = useState<string>("");
@@ -44,7 +46,11 @@ export default function AdminClient({
   }, [rows, contractor, risk, status, dateFrom, dateTo]);
 
   async function refresh() {
-    const { data } = await supabase.from("observations").select("*").order("created_at", { ascending: false });
+    const { data } = await supabase
+      .from("observations")
+      .select("*")
+      .order("created_at", { ascending: false });
+
     setRows((data as any) ?? []);
   }
 
@@ -68,46 +74,58 @@ export default function AdminClient({
     await refresh();
   }
 
-async function deleteAll() {
-  const ok = confirm("⚠️ Delete ALL observations and ALL photos?\nThis cannot be undone.");
-  if (!ok) return;
+  async function deleteAll() {
+    const ok = confirm("⚠️ Delete ALL observations and ALL photos?\nThis cannot be undone.");
+    if (!ok) return;
 
-  try {
-    const res = await fetch("/api/admin/purge-observations", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      cache: "no-store",
-    });
+    try {
+      const res = await fetch("/api/admin/purge-observations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+      });
 
-    const text = await res.text();
-    let json: any = null;
-    try { json = JSON.parse(text); } catch {}
+      const text = await res.text();
+      let json: any = null;
+      try { json = JSON.parse(text); } catch {}
 
-    if (!res.ok) {
-      alert(json?.error ? `Error: ${json.error}` : `Failed: ${res.status}\n${text}`);
+      if (!res.ok) {
+        alert(json?.error ? `Error: ${json.error}` : `Failed: ${res.status}\n${text}`);
+        return;
+      }
+
+      alert(`Done ✅ Deleted photos: ${json?.deletedPhotos ?? 0}`);
+      await refresh();
+    } catch (e: any) {
+      alert(`Request failed: ${e?.message ?? e}`);
+    }
+  }
+
+  // ✅ Excel export WITH images (Before/After)
+  async function exportToExcel() {
+    if (!filteredRows.length) {
+      alert("No data to export");
       return;
     }
 
-    alert(`Done ✅ Deleted photos: ${json?.deletedPhotos ?? 0}`);
-    await refresh();
-  } catch (e: any) {
-    alert(`Request failed: ${e?.message ?? e}`);
-  }
-}
-
-    // 1) Get admin name (optional)
+    // 1) admin name
     const {
       data: { user },
     } = await supabase.auth.getUser();
 
     let adminName = "Admin";
     if (user?.id) {
-      const { data: prof } = await supabase.from("profiles").select("full_name").eq("id", user.id).single();
+      const { data: prof } = await supabase
+        .from("profiles")
+        .select("full_name")
+        .eq("id", user.id)
+        .single();
       adminName = prof?.full_name ?? "Admin";
     }
 
-    // 2) Load ExcelJS (client-side)
-    const ExcelJS = await import("exceljs");
+    // 2) load ExcelJS
+    const ExcelJSImport = await import("exceljs");
+    const ExcelJS = ExcelJSImport.default ?? (ExcelJSImport as any);
     const wb = new ExcelJS.Workbook();
     wb.creator = adminName;
 
@@ -118,7 +136,6 @@ async function deleteAll() {
     const today = new Date();
     const dateStr = today.toISOString().slice(0, 10);
 
-    // Helper: add nice borders
     function setBorder(rowIndex: number, fromCol: number, toCol: number) {
       for (let c = fromCol; c <= toCol; c++) {
         const cell = ws.getCell(rowIndex, c);
@@ -131,34 +148,38 @@ async function deleteAll() {
       }
     }
 
-    // Helper: get image ArrayBuffer
-    async function getImageArrayBufferFromValue(value: string): Promise<{ ab: ArrayBuffer; ext: "png" | "jpeg" } | null> {
+    async function getImageArrayBufferFromStoragePath(
+      pathOrUrl: string
+    ): Promise<{ ab: ArrayBuffer; ext: "png" | "jpeg" } | null> {
       try {
-        // if it's a full URL already
-        if (value.startsWith("http://") || value.startsWith("https://")) {
-          const res = await fetch(value);
+        // full URL
+        if (pathOrUrl.startsWith("http://") || pathOrUrl.startsWith("https://")) {
+          const res = await fetch(pathOrUrl);
           if (!res.ok) return null;
           const ab = await res.arrayBuffer();
-          const ext = value.toLowerCase().includes(".png") ? "png" : "jpeg";
+          const ext = pathOrUrl.toLowerCase().includes(".png") ? "png" : "jpeg";
           return { ab, ext };
         }
 
-        // else assume it's a storage path inside bucket "observations"
-        const { data, error } = await supabase.storage.from("observations").createSignedUrl(value, 60 * 10);
+        // storage path
+        const { data, error } = await supabase.storage
+          .from("observations")
+          .createSignedUrl(pathOrUrl, 60 * 10);
+
         if (error || !data?.signedUrl) return null;
 
         const res = await fetch(data.signedUrl);
         if (!res.ok) return null;
 
         const ab = await res.arrayBuffer();
-        const ext = value.toLowerCase().endsWith(".png") ? "png" : "jpeg";
+        const ext = pathOrUrl.toLowerCase().endsWith(".png") ? "png" : "jpeg";
         return { ab, ext };
       } catch {
         return null;
       }
     }
 
-    // Build header area
+    // Header area
     ws.mergeCells("A1:L1");
     ws.mergeCells("A2:L2");
     ws.mergeCells("A3:L3");
@@ -208,12 +229,12 @@ async function deleteAll() {
       { header: "After Photo", key: "after_img", width: 18 },
     ];
 
-    // Table Header Row
     const tableHeaderRow = 6;
     ws.getRow(4).height = 8;
     ws.getRow(5).height = 8;
 
-    const headers = [
+    ws.getRow(tableHeaderRow).values = [
+      "",
       "Item No",
       "Date",
       "Contractor",
@@ -228,7 +249,6 @@ async function deleteAll() {
       "After Photo",
     ];
 
-    ws.getRow(tableHeaderRow).values = ["", ...headers];
     ws.getRow(tableHeaderRow).height = 22;
     ws.getRow(tableHeaderRow).font = { bold: true, color: { argb: "FFFFFFFF" } };
     ws.getRow(tableHeaderRow).alignment = { vertical: "middle", horizontal: "center", wrapText: true };
@@ -255,12 +275,11 @@ async function deleteAll() {
       ws.getCell(rowIndex, 8).value = r.assigned_to ?? "";
       ws.getCell(rowIndex, 9).value = r.observation ?? "";
       ws.getCell(rowIndex, 10).value = r.recommendation ?? "";
-
       setBorder(rowIndex, 1, 12);
 
-      // Before image (col K = 11)
+      // Before image (K)
       if (r.before_photo_url) {
-        const img = await getImageArrayBufferFromValue(r.before_photo_url);
+        const img = await getImageArrayBufferFromStoragePath(r.before_photo_url);
         if (img) {
           const b64 = arrayBufferToBase64(img.ab);
           const imgId = wb.addImage({
@@ -268,21 +287,20 @@ async function deleteAll() {
             extension: img.ext,
           });
 
-          // ExcelJS uses 0-based col/row for image placement
           ws.addImage(imgId, {
-            tl: { col: 10, row: rowIndex - 1 },
+            tl: { col: 10, row: rowIndex - 1 }, // K
             ext: { width: 120, height: 80 },
           });
         } else {
-          ws.getCell(rowIndex, 11).value = "Image not доступ";
+          ws.getCell(rowIndex, 11).value = "No image";
         }
       } else {
         ws.getCell(rowIndex, 11).value = "-";
       }
 
-      // After image (col L = 12)
+      // After image (L)
       if (r.after_photo_url) {
-        const img = await getImageArrayBufferFromValue(r.after_photo_url);
+        const img = await getImageArrayBufferFromStoragePath(r.after_photo_url);
         if (img) {
           const b64 = arrayBufferToBase64(img.ab);
           const imgId = wb.addImage({
@@ -291,11 +309,11 @@ async function deleteAll() {
           });
 
           ws.addImage(imgId, {
-            tl: { col: 11, row: rowIndex - 1 },
+            tl: { col: 11, row: rowIndex - 1 }, // L
             ext: { width: 120, height: 80 },
           });
         } else {
-          ws.getCell(rowIndex, 12).value = "Image not доступ";
+          ws.getCell(rowIndex, 12).value = "No image";
         }
       } else {
         ws.getCell(rowIndex, 12).value = "-";
@@ -314,7 +332,6 @@ async function deleteAll() {
     const blob = new Blob([buf], {
       type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     });
-
     saveAs(blob, `Monthly_Observation_Report_${dateStr}.xlsx`);
   }
 
@@ -490,7 +507,6 @@ function input(): React.CSSProperties {
     outline: "none",
   };
 }
-
 function resetBtn(): React.CSSProperties {
   return {
     padding: 8,
@@ -502,7 +518,6 @@ function resetBtn(): React.CSSProperties {
     fontWeight: 700,
   };
 }
-
 function btnAlt(): React.CSSProperties {
   return {
     padding: "10px 14px",
@@ -514,7 +529,6 @@ function btnAlt(): React.CSSProperties {
     cursor: "pointer",
   };
 }
-
 function btnLink(): React.CSSProperties {
   return {
     padding: "10px 14px",
@@ -528,7 +542,6 @@ function btnLink(): React.CSSProperties {
     alignItems: "center",
   };
 }
-
 function btnGray(): React.CSSProperties {
   return {
     padding: "10px 14px",
@@ -540,7 +553,6 @@ function btnGray(): React.CSSProperties {
     cursor: "pointer",
   };
 }
-
 function btnDanger(): React.CSSProperties {
   return {
     padding: "10px 14px",
@@ -552,7 +564,6 @@ function btnDanger(): React.CSSProperties {
     cursor: "pointer",
   };
 }
-
 function btnPrimary(): React.CSSProperties {
   return {
     padding: "10px 16px",
