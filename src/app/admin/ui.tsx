@@ -57,6 +57,9 @@ export default function AdminClient({
   }
 
   async function deleteRow(row: Observation) {
+    const ok = confirm(`Delete observation ${row.item_no ?? ""}?`);
+    if (!ok) return;
+
     const { error } = await supabase.from("observations").delete().eq("id", row.id);
     if (error) {
       alert(error.message);
@@ -70,14 +73,14 @@ export default function AdminClient({
     if (!ok) return;
 
     const res = await fetch("/api/admin/purge-observations", { method: "POST" });
-    const json = await res.json();
+    const json = await res.json().catch(() => ({}));
 
     if (!res.ok) {
       alert(json?.error ?? "Failed");
       return;
     }
 
-    alert(`Done ✅ Deleted photos: ${json.deletedPhotos ?? 0}`);
+    alert(`Done ✅ Deleted rows & photos.\nDeleted photos: ${json.deletedPhotos ?? 0}`);
     await refresh();
   }
 
@@ -87,7 +90,7 @@ export default function AdminClient({
       return;
     }
 
-    // admin name
+    // 1) Get admin name (optional)
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -98,29 +101,19 @@ export default function AdminClient({
       adminName = prof?.full_name ?? "Admin";
     }
 
-    const ExcelJS = (await import("exceljs")).default;
+    // 2) Load ExcelJS (client-side)
+    const ExcelJS = await import("exceljs");
     const wb = new ExcelJS.Workbook();
-    const ws = wb.addWorksheet("Report");
+    wb.creator = adminName;
 
-    async function fetchAsBase64(url: string) {
-      const res = await fetch(url);
-      const ab = await res.arrayBuffer();
-      return arrayBufferToBase64(ab);
-    }
+    const ws = wb.addWorksheet("Observations", {
+      views: [{ state: "frozen", ySplit: 6 }],
+    });
 
-    async function pathToImageId(path: string) {
-      const { data, error } = await supabase.storage.from("observations").createSignedUrl(path, 60 * 5);
-      if (error || !data?.signedUrl) return null;
+    const today = new Date();
+    const dateStr = today.toISOString().slice(0, 10);
 
-      const res = await fetch(data.signedUrl);
-      if (!res.ok) return null;
-
-      const ab = await res.arrayBuffer();
-      const b64 = arrayBufferToBase64(ab);
-      const ext = path.toLowerCase().endsWith(".png") ? "png" : "jpeg";
-      return wb.addImage({ base64: `data:image/${ext};base64,${b64}`, extension: ext });
-    }
-
+    // Helper: add nice borders
     function setBorder(rowIndex: number, fromCol: number, toCol: number) {
       for (let c = fromCol; c <= toCol; c++) {
         const cell = ws.getCell(rowIndex, c);
@@ -133,26 +126,39 @@ export default function AdminClient({
       }
     }
 
-    ws.columns = [
-      { header: "Item No", key: "item_no", width: 14 },
-      { header: "Date", key: "date", width: 12 },
-      { header: "Contractor", key: "contractor", width: 18 },
-      { header: "Location", key: "location", width: 18 },
-      { header: "Category", key: "category", width: 22 },
-      { header: "Risk", key: "risk", width: 10 },
-      { header: "Status", key: "status", width: 10 },
-      { header: "Assigned To", key: "assigned_to", width: 16 },
-      { header: "Observation", key: "observation", width: 30 },
-      { header: "Recommendation", key: "recommendation", width: 30 },
-      { header: "Before Photo", key: "before_img", width: 18 },
-      { header: "After Photo", key: "after_img", width: 18 },
-    ];
+    // Helper: get image ArrayBuffer
+    async function getImageArrayBufferFromValue(value: string): Promise<{ ab: ArrayBuffer; ext: "png" | "jpeg" } | null> {
+      try {
+        // if it's a full URL already
+        if (value.startsWith("http://") || value.startsWith("https://")) {
+          const res = await fetch(value);
+          if (!res.ok) return null;
+          const ab = await res.arrayBuffer();
+          const ext = value.toLowerCase().includes(".png") ? "png" : "jpeg";
+          return { ab, ext };
+        }
 
+        // else assume it's a storage path inside bucket "observations"
+        const { data, error } = await supabase.storage.from("observations").createSignedUrl(value, 60 * 10);
+        if (error || !data?.signedUrl) return null;
+
+        const res = await fetch(data.signedUrl);
+        if (!res.ok) return null;
+
+        const ab = await res.arrayBuffer();
+        const ext = value.toLowerCase().endsWith(".png") ? "png" : "jpeg";
+        return { ab, ext };
+      } catch {
+        return null;
+      }
+    }
+
+    // Build header area
     ws.mergeCells("A1:L1");
     ws.mergeCells("A2:L2");
     ws.mergeCells("A3:L3");
 
-    ws.getRow(1).height = 36;
+    ws.getRow(1).height = 34;
     ws.getRow(2).height = 22;
     ws.getRow(3).height = 18;
 
@@ -160,9 +166,6 @@ export default function AdminClient({
     ws.getCell("A1").font = { bold: true, size: 18, color: { argb: "FFFFFFFF" } };
     ws.getCell("A1").alignment = { vertical: "middle", horizontal: "center" };
     ws.getCell("A1").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF8B0000" } };
-
-    const today = new Date();
-    const dateStr = today.toISOString().slice(0, 10);
 
     ws.getCell("A2").value = `Report Date: ${dateStr}   |   Created by: ${adminName}`;
     ws.getCell("A2").font = { bold: true, size: 11, color: { argb: "FFE0E0E0" } };
@@ -184,15 +187,26 @@ export default function AdminClient({
     ws.getCell("A3").alignment = { vertical: "middle", horizontal: "center" };
     ws.getCell("A3").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1F1F1F" } };
 
-    // Logo (optional)
-    try {
-      const logoBase64 = await fetchAsBase64("/logo.png");
-      const logoId = wb.addImage({ base64: `data:image/png;base64,${logoBase64}`, extension: "png" });
-      ws.addImage(logoId, { tl: { col: 0, row: 0 }, ext: { width: 120, height: 60 } });
-    } catch { }
+    // Columns
+    ws.columns = [
+      { header: "Item No", key: "item_no", width: 14 },
+      { header: "Date", key: "date", width: 12 },
+      { header: "Contractor", key: "contractor", width: 18 },
+      { header: "Location", key: "location", width: 18 },
+      { header: "Category", key: "category", width: 22 },
+      { header: "Risk", key: "risk", width: 10 },
+      { header: "Status", key: "status", width: 10 },
+      { header: "Assigned To", key: "assigned_to", width: 16 },
+      { header: "Observation", key: "observation", width: 30 },
+      { header: "Recommendation", key: "recommendation", width: 30 },
+      { header: "Before Photo", key: "before_img", width: 18 },
+      { header: "After Photo", key: "after_img", width: 18 },
+    ];
 
-    const tableHeaderRow = 5;
+    // Table Header Row
+    const tableHeaderRow = 6;
     ws.getRow(4).height = 8;
+    ws.getRow(5).height = 8;
 
     const headers = [
       "Item No",
@@ -218,11 +232,12 @@ export default function AdminClient({
     });
     setBorder(tableHeaderRow, 1, 12);
 
+    // Rows
     for (let i = 0; i < filteredRows.length; i++) {
       const r = filteredRows[i];
       const rowIndex = tableHeaderRow + 1 + i;
 
-      ws.getRow(rowIndex).height = 75;
+      ws.getRow(rowIndex).height = 78;
       ws.getRow(rowIndex).alignment = { vertical: "top", wrapText: true };
 
       ws.getCell(rowIndex, 1).value = r.item_no ?? "";
@@ -238,59 +253,124 @@ export default function AdminClient({
 
       setBorder(rowIndex, 1, 12);
 
-      // Before (K)
+      // Before image (col K = 11)
       if (r.before_photo_url) {
-        const imgId = await pathToImageId(r.before_photo_url);
-        if (imgId) ws.addImage(imgId, { tl: { col: 10, row: rowIndex - 1 }, ext: { width: 120, height: 80 } });
-        else ws.getCell(rowIndex, 11).value = "No Image";
-      } else ws.getCell(rowIndex, 11).value = "-";
+        const img = await getImageArrayBufferFromValue(r.before_photo_url);
+        if (img) {
+          const b64 = arrayBufferToBase64(img.ab);
+          const imgId = wb.addImage({
+            base64: `data:image/${img.ext};base64,${b64}`,
+            extension: img.ext,
+          });
 
-      // After (L)
+          // ExcelJS uses 0-based col/row for image placement
+          ws.addImage(imgId, {
+            tl: { col: 10, row: rowIndex - 1 },
+            ext: { width: 120, height: 80 },
+          });
+        } else {
+          ws.getCell(rowIndex, 11).value = "Image not доступ";
+        }
+      } else {
+        ws.getCell(rowIndex, 11).value = "-";
+      }
+
+      // After image (col L = 12)
       if (r.after_photo_url) {
-        const imgId = await pathToImageId(r.after_photo_url);
-        if (imgId) ws.addImage(imgId, { tl: { col: 11, row: rowIndex - 1 }, ext: { width: 120, height: 80 } });
-        else ws.getCell(rowIndex, 12).value = "No Image";
-      } else ws.getCell(rowIndex, 12).value = "-";
+        const img = await getImageArrayBufferFromValue(r.after_photo_url);
+        if (img) {
+          const b64 = arrayBufferToBase64(img.ab);
+          const imgId = wb.addImage({
+            base64: `data:image/${img.ext};base64,${b64}`,
+            extension: img.ext,
+          });
+
+          ws.addImage(imgId, {
+            tl: { col: 11, row: rowIndex - 1 },
+            ext: { width: 120, height: 80 },
+          });
+        } else {
+          ws.getCell(rowIndex, 12).value = "Image not доступ";
+        }
+      } else {
+        ws.getCell(rowIndex, 12).value = "-";
+      }
     }
 
-    ws.views = [{ state: "frozen", ySplit: tableHeaderRow }];
-
+    // Footer
     const footerRow = tableHeaderRow + filteredRows.length + 2;
     ws.mergeCells(`A${footerRow}:L${footerRow}`);
     ws.getCell(`A${footerRow}`).value = "Generated from Par Level Observation System";
     ws.getCell(`A${footerRow}`).alignment = { horizontal: "center" };
     ws.getCell(`A${footerRow}`).font = { italic: true, size: 10, color: { argb: "FFB0B0B0" } };
 
+    // Export
     const buf = await wb.xlsx.writeBuffer();
-    const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    const blob = new Blob([buf], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+
     saveAs(blob, `Monthly_Observation_Report_${dateStr}.xlsx`);
   }
 
   return (
     <div style={{ minHeight: "100vh", background: "#1e1e1e", color: "#e0e0e0", padding: 18 }}>
-      <Header title="Admin Dashboard" onNew={() => { setCreating(true); setEditing(null); }} onExport={exportToExcel} onDeleteAll={deleteAll} />
+      <Header
+        title="Admin Dashboard"
+        onNew={() => {
+          setCreating(true);
+          setEditing(null);
+        }}
+        onExport={exportToExcel}
+        onDeleteAll={deleteAll}
+      />
 
       {/* FILTER BAR */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 12, marginBottom: 20, background: "#2a2a2a", padding: 15, borderRadius: 12, border: "1px solid #333" }}>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(6, 1fr)",
+          gap: 12,
+          marginBottom: 20,
+          background: "#2a2a2a",
+          padding: 15,
+          borderRadius: 12,
+          border: "1px solid #333",
+        }}
+      >
         <select value={contractor} onChange={(e) => setContractor(e.target.value)} style={input()}>
           <option value="">All Contractors</option>
-          {CONTRACTORS.map((c) => <option key={c} value={c}>{c}</option>)}
+          {CONTRACTORS.map((c) => (
+            <option key={c} value={c}>
+              {c}
+            </option>
+          ))}
         </select>
 
         <select value={risk} onChange={(e) => setRisk(e.target.value)} style={input()}>
           <option value="">All Risk</option>
-          {RISK_LEVELS.map((r) => <option key={r} value={r}>{r}</option>)}
+          {RISK_LEVELS.map((r) => (
+            <option key={r} value={r}>
+              {r}
+            </option>
+          ))}
         </select>
 
         <select value={status} onChange={(e) => setStatus(e.target.value)} style={input()}>
           <option value="">All Status</option>
-          {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+          {STATUSES.map((s) => (
+            <option key={s} value={s}>
+              {s}
+            </option>
+          ))}
         </select>
 
         <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} style={input()} />
         <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} style={input()} />
 
-        <button onClick={resetFilters} style={resetBtn()}>Reset</button>
+        <button onClick={resetFilters} style={resetBtn()}>
+          Reset
+        </button>
       </div>
 
       {(creating || editing) && (
@@ -298,11 +378,13 @@ export default function AdminClient({
           {creating && (
             <div style={{ marginBottom: 10 }}>
               <select value={owner} onChange={(e) => setOwner(e.target.value)} style={input()}>
-                {employees.filter((e) => e.role === "employee").map((e) => (
-                  <option key={e.id} value={e.id}>
-                    {e.full_name ?? e.id}
-                  </option>
-                ))}
+                {employees
+                  .filter((e) => e.role === "employee")
+                  .map((e) => (
+                    <option key={e.id} value={e.id}>
+                      {e.full_name ?? e.id}
+                    </option>
+                  ))}
               </select>
             </div>
           )}
@@ -311,15 +393,25 @@ export default function AdminClient({
             mode={creating ? "create" : "edit"}
             initial={editing}
             ownerUserIdForAdmin={creating ? owner : undefined}
-            onCancel={() => { setCreating(false); setEditing(null); }}
-            onSaved={async () => { setCreating(false); setEditing(null); await refresh(); }}
+            onCancel={() => {
+              setCreating(false);
+              setEditing(null);
+            }}
+            onSaved={async () => {
+              setCreating(false);
+              setEditing(null);
+              await refresh();
+            }}
           />
         </div>
       )}
 
       <ObservationsTable
         rows={filteredRows}
-        onEdit={(r) => { setEditing(r); setCreating(false); }}
+        onEdit={(r) => {
+          setEditing(r);
+          setCreating(false);
+        }}
         onDelete={deleteRow}
       />
 
@@ -328,6 +420,7 @@ export default function AdminClient({
   );
 }
 
+/** Header **/
 function Header({
   title,
   onNew,
@@ -348,21 +441,32 @@ function Header({
 
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
         <form action="/api/auth/signout" method="post">
-          <button type="submit" style={btnAlt()}>Sign out</button>
+          <button type="submit" style={btnAlt()}>
+            Sign out
+          </button>
         </form>
 
-        <Link href="/admin/stats" style={btnLink()}>Employee Stats</Link>
+        <Link href="/admin/stats" style={btnLink()}>
+          Employee Stats
+        </Link>
 
-        <button onClick={onExport} style={btnGray()}>Export Excel</button>
+        <button onClick={onExport} style={btnGray()}>
+          Export Excel
+        </button>
 
-        <button onClick={onDeleteAll} style={btnDanger()}>Delete All</button>
+        <button onClick={onDeleteAll} style={btnDanger()}>
+          Delete All
+        </button>
 
-        <button onClick={onNew} style={btnPrimary()}>+ New</button>
+        <button onClick={onNew} style={btnPrimary()}>
+          + New
+        </button>
       </div>
     </div>
   );
 }
 
+/** Helpers **/
 function arrayBufferToBase64(buffer: ArrayBuffer) {
   let binary = "";
   const bytes = new Uint8Array(buffer);
@@ -370,30 +474,88 @@ function arrayBufferToBase64(buffer: ArrayBuffer) {
   return btoa(binary);
 }
 
+/** Styles **/
 function input(): React.CSSProperties {
-  return { padding: 8, borderRadius: 8, border: "1px solid #444", background: "#2f2f2f", color: "#e0e0e0", outline: "none" };
+  return {
+    padding: 8,
+    borderRadius: 8,
+    border: "1px solid #444",
+    background: "#2f2f2f",
+    color: "#e0e0e0",
+    outline: "none",
+  };
 }
 
 function resetBtn(): React.CSSProperties {
-  return { padding: 8, borderRadius: 8, background: "#444", color: "#e0e0e0", border: "none", cursor: "pointer", fontWeight: 700 };
+  return {
+    padding: 8,
+    borderRadius: 8,
+    background: "#444",
+    color: "#e0e0e0",
+    border: "none",
+    cursor: "pointer",
+    fontWeight: 700,
+  };
 }
 
 function btnAlt(): React.CSSProperties {
-  return { padding: "10px 14px", borderRadius: 8, background: "transparent", color: "#e0e0e0", border: "1px solid #555", fontWeight: 700, cursor: "pointer" };
+  return {
+    padding: "10px 14px",
+    borderRadius: 8,
+    background: "transparent",
+    color: "#e0e0e0",
+    border: "1px solid #555",
+    fontWeight: 700,
+    cursor: "pointer",
+  };
 }
 
 function btnLink(): React.CSSProperties {
-  return { padding: "10px 14px", borderRadius: 8, background: "#2f2f2f", color: "#fff", border: "1px solid #555", fontWeight: 800, textDecoration: "none", display: "inline-flex", alignItems: "center" };
+  return {
+    padding: "10px 14px",
+    borderRadius: 8,
+    background: "#2f2f2f",
+    color: "#fff",
+    border: "1px solid #555",
+    fontWeight: 800,
+    textDecoration: "none",
+    display: "inline-flex",
+    alignItems: "center",
+  };
 }
 
 function btnGray(): React.CSSProperties {
-  return { padding: "10px 14px", borderRadius: 8, background: "#3a3a3a", color: "#fff", border: "1px solid #555", fontWeight: 800, cursor: "pointer" };
+  return {
+    padding: "10px 14px",
+    borderRadius: 8,
+    background: "#3a3a3a",
+    color: "#fff",
+    border: "1px solid #555",
+    fontWeight: 800,
+    cursor: "pointer",
+  };
 }
 
 function btnDanger(): React.CSSProperties {
-  return { padding: "10px 14px", borderRadius: 8, background: "#8b0000", color: "#fff", border: "1px solid #8b0000", fontWeight: 900, cursor: "pointer" };
+  return {
+    padding: "10px 14px",
+    borderRadius: 8,
+    background: "#8b0000",
+    color: "#fff",
+    border: "1px solid #8b0000",
+    fontWeight: 900,
+    cursor: "pointer",
+  };
 }
 
 function btnPrimary(): React.CSSProperties {
-  return { padding: "10px 16px", borderRadius: 8, background: "#8b0000", color: "#fff", border: "none", fontWeight: 800, cursor: "pointer" };
+  return {
+    padding: "10px 16px",
+    borderRadius: 8,
+    background: "#8b0000",
+    color: "#fff",
+    border: "none",
+    fontWeight: 800,
+    cursor: "pointer",
+  };
 }
