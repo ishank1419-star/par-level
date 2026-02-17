@@ -189,7 +189,7 @@ export default function AdminClient({
       const logoBase64 = await fetchAsBase64("/logo.png");
       const logoId = wb.addImage({ base64: `data:image/png;base64,${logoBase64}`, extension: "png" });
       ws.addImage(logoId, { tl: { col: 0, row: 0 }, ext: { width: 120, height: 60 } });
-    } catch {}
+    } catch { }
 
     const tableHeaderRow = 5;
     ws.getRow(4).height = 8;
